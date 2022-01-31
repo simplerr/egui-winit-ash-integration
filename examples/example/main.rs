@@ -207,7 +207,7 @@ impl App {
             .build(event_loop)?;
 
         // Create Entry
-        let entry = unsafe { Entry::new() }?;
+        let entry = Entry::linked();
 
         // Create Instance
         let instance = {
