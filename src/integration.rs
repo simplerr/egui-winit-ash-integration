@@ -8,9 +8,9 @@ use ash::{extensions::khr::Swapchain, vk, Device};
 use bytemuck::bytes_of;
 use copypasta::{ClipboardContext, ClipboardProvider};
 use egui::{
-    math::{pos2, vec2},
-    paint::ClippedShape,
-    CtxRef, Key,
+    emath::{pos2, vec2},
+    epaint::ClippedShape,
+    Context, Key,
 };
 use winit::event::{Event, ModifiersState, VirtualKeyCode, WindowEvent};
 use winit::window::Window;
@@ -24,7 +24,7 @@ pub struct Integration<A: AllocatorTrait> {
     physical_width: u32,
     physical_height: u32,
     scale_factor: f64,
-    context: CtxRef,
+    context: Context,
     raw_input: egui::RawInput,
     mouse_pos: egui::Pos2,
     modifiers_state: ModifiersState,
@@ -52,11 +52,12 @@ pub struct Integration<A: AllocatorTrait> {
     font_image_allocation: Option<A::Allocation>,
     font_image_view: vk::ImageView,
     font_image_size: (u64, u64),
-    font_image_version: u64,
     font_descriptor_sets: Vec<vk::DescriptorSet>,
 
     user_texture_layout: vk::DescriptorSetLayout,
     user_textures: Vec<Option<vk::DescriptorSet>>,
+
+    textures_delta: egui::epaint::textures::TexturesDelta,
 }
 impl<A: AllocatorTrait> Integration<A> {
     /// Create an instance of the integration.
@@ -76,7 +77,7 @@ impl<A: AllocatorTrait> Integration<A> {
         let start_time = None;
 
         // Create context
-        let context = CtxRef::default();
+        let context = Context::default();
         context.set_fonts(font_definitions);
         context.set_style(style);
 
@@ -479,7 +480,6 @@ impl<A: AllocatorTrait> Integration<A> {
         let font_image_allocation = None;
         let font_image_view = Default::default();
         let font_image_size = (0, 0);
-        let font_image_version = 0;
         let font_descriptor_sets = unsafe {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::builder()
@@ -540,11 +540,12 @@ impl<A: AllocatorTrait> Integration<A> {
             font_image_allocation,
             font_image_view,
             font_image_size,
-            font_image_version,
             font_descriptor_sets,
 
             user_texture_layout,
             user_textures,
+
+            textures_delta: egui::epaint::textures::TexturesDelta::default(),
         }
     }
 
@@ -609,10 +610,14 @@ impl<A: AllocatorTrait> Integration<A> {
                 WindowEvent::MouseWheel { delta, .. } => match delta {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         let line_height = 24.0;
-                        self.raw_input.scroll_delta = vec2(*x, *y) * line_height;
+                        self.raw_input
+                            .events
+                            .push(egui::Event::Scroll(vec2(*x, *y) * line_height));
                     }
                     winit::event::MouseScrollDelta::PixelDelta(delta) => {
-                        self.raw_input.scroll_delta = vec2(delta.x as f32, delta.y as f32);
+                        self.raw_input
+                            .events
+                            .push(egui::Event::Scroll(vec2(delta.x as f32, delta.y as f32)));
                     }
                 },
                 // mouse move
@@ -763,33 +768,47 @@ impl<A: AllocatorTrait> Integration<A> {
     fn egui_to_winit_cursor_icon(
         cursor_icon: egui::CursorIcon,
     ) -> Option<winit::window::CursorIcon> {
-        Some(match cursor_icon {
-            egui::CursorIcon::Default => winit::window::CursorIcon::Default,
-            egui::CursorIcon::PointingHand => winit::window::CursorIcon::Hand,
-            egui::CursorIcon::ResizeHorizontal => winit::window::CursorIcon::ColResize,
-            egui::CursorIcon::ResizeNeSw => winit::window::CursorIcon::NeResize,
-            egui::CursorIcon::ResizeNwSe => winit::window::CursorIcon::NwResize,
-            egui::CursorIcon::ResizeVertical => winit::window::CursorIcon::RowResize,
-            egui::CursorIcon::Text => winit::window::CursorIcon::Text,
-            egui::CursorIcon::Grab => winit::window::CursorIcon::Grab,
-            egui::CursorIcon::Grabbing => winit::window::CursorIcon::Grabbing,
-            egui::CursorIcon::None => return None,
-            egui::CursorIcon::ContextMenu => winit::window::CursorIcon::ContextMenu,
-            egui::CursorIcon::Help => winit::window::CursorIcon::Help,
-            egui::CursorIcon::Progress => winit::window::CursorIcon::Progress,
-            egui::CursorIcon::Wait => winit::window::CursorIcon::Wait,
-            egui::CursorIcon::Cell => winit::window::CursorIcon::Cell,
-            egui::CursorIcon::Crosshair => winit::window::CursorIcon::Crosshair,
-            egui::CursorIcon::VerticalText => winit::window::CursorIcon::VerticalText,
-            egui::CursorIcon::Alias => winit::window::CursorIcon::Alias,
-            egui::CursorIcon::Copy => winit::window::CursorIcon::Copy,
-            egui::CursorIcon::Move => winit::window::CursorIcon::Move,
-            egui::CursorIcon::NoDrop => winit::window::CursorIcon::NoDrop,
-            egui::CursorIcon::NotAllowed => winit::window::CursorIcon::NotAllowed,
-            egui::CursorIcon::AllScroll => winit::window::CursorIcon::AllScroll,
-            egui::CursorIcon::ZoomIn => winit::window::CursorIcon::ZoomIn,
-            egui::CursorIcon::ZoomOut => winit::window::CursorIcon::ZoomOut,
-        })
+        match cursor_icon {
+            egui::CursorIcon::None => None,
+
+            egui::CursorIcon::Alias => Some(winit::window::CursorIcon::Alias),
+            egui::CursorIcon::AllScroll => Some(winit::window::CursorIcon::AllScroll),
+            egui::CursorIcon::Cell => Some(winit::window::CursorIcon::Cell),
+            egui::CursorIcon::ContextMenu => Some(winit::window::CursorIcon::ContextMenu),
+            egui::CursorIcon::Copy => Some(winit::window::CursorIcon::Copy),
+            egui::CursorIcon::Crosshair => Some(winit::window::CursorIcon::Crosshair),
+            egui::CursorIcon::Default => Some(winit::window::CursorIcon::Default),
+            egui::CursorIcon::Grab => Some(winit::window::CursorIcon::Grab),
+            egui::CursorIcon::Grabbing => Some(winit::window::CursorIcon::Grabbing),
+            egui::CursorIcon::Help => Some(winit::window::CursorIcon::Help),
+            egui::CursorIcon::Move => Some(winit::window::CursorIcon::Move),
+            egui::CursorIcon::NoDrop => Some(winit::window::CursorIcon::NoDrop),
+            egui::CursorIcon::NotAllowed => Some(winit::window::CursorIcon::NotAllowed),
+            egui::CursorIcon::PointingHand => Some(winit::window::CursorIcon::Hand),
+            egui::CursorIcon::Progress => Some(winit::window::CursorIcon::Progress),
+
+            egui::CursorIcon::ResizeHorizontal => Some(winit::window::CursorIcon::EwResize),
+            egui::CursorIcon::ResizeNeSw => Some(winit::window::CursorIcon::NeswResize),
+            egui::CursorIcon::ResizeNwSe => Some(winit::window::CursorIcon::NwseResize),
+            egui::CursorIcon::ResizeVertical => Some(winit::window::CursorIcon::NsResize),
+
+            egui::CursorIcon::ResizeEast => Some(winit::window::CursorIcon::EResize),
+            egui::CursorIcon::ResizeSouthEast => Some(winit::window::CursorIcon::SeResize),
+            egui::CursorIcon::ResizeSouth => Some(winit::window::CursorIcon::SResize),
+            egui::CursorIcon::ResizeSouthWest => Some(winit::window::CursorIcon::SwResize),
+            egui::CursorIcon::ResizeWest => Some(winit::window::CursorIcon::WResize),
+            egui::CursorIcon::ResizeNorthWest => Some(winit::window::CursorIcon::NwResize),
+            egui::CursorIcon::ResizeNorth => Some(winit::window::CursorIcon::NResize),
+            egui::CursorIcon::ResizeNorthEast => Some(winit::window::CursorIcon::NeResize),
+            egui::CursorIcon::ResizeColumn => Some(winit::window::CursorIcon::ColResize),
+            egui::CursorIcon::ResizeRow => Some(winit::window::CursorIcon::RowResize),
+
+            egui::CursorIcon::Text => Some(winit::window::CursorIcon::Text),
+            egui::CursorIcon::VerticalText => Some(winit::window::CursorIcon::VerticalText),
+            egui::CursorIcon::Wait => Some(winit::window::CursorIcon::Wait),
+            egui::CursorIcon::ZoomIn => Some(winit::window::CursorIcon::ZoomIn),
+            egui::CursorIcon::ZoomOut => Some(winit::window::CursorIcon::ZoomOut),
+        }
     }
 
     /// begin frame.
@@ -798,41 +817,52 @@ impl<A: AllocatorTrait> Integration<A> {
     }
 
     /// end frame.
-    pub fn end_frame(&mut self, window: &Window) -> (egui::Output, Vec<ClippedShape>) {
-        let (output, clipped_shapes) = self.context.end_frame();
+    pub fn end_frame(&mut self, window: &Window) -> (egui::PlatformOutput, Vec<ClippedShape>) {
+        let egui::FullOutput {
+            platform_output,
+            repaint_after: _,
+            textures_delta,
+            shapes,
+        } = self.context.end_frame();
+
+        // store to upload in upload_font_texture() from paint()
+        self.textures_delta = textures_delta;
 
         // handle links
-        if let Some(egui::output::OpenUrl { url, .. }) = &output.open_url {
+        if let Some(egui::output::OpenUrl { url, .. }) = &platform_output.open_url {
             if let Err(err) = webbrowser::open(url) {
                 eprintln!("Failed to open url: {}", err);
             }
         }
 
         // handle clipboard
-        if !output.copied_text.is_empty() {
-            if let Err(err) = self.clipboard.set_contents(output.copied_text.clone()) {
+        if !platform_output.copied_text.is_empty() {
+            if let Err(err) = self
+                .clipboard
+                .set_contents(platform_output.copied_text.clone())
+            {
                 eprintln!("Copy/Cut error: {}", err);
             }
         }
 
         // handle cursor icon
-        if self.current_cursor_icon != output.cursor_icon {
+        if self.current_cursor_icon != platform_output.cursor_icon {
             if let Some(cursor_icon) =
-                Integration::<A>::egui_to_winit_cursor_icon(output.cursor_icon)
+                Integration::<A>::egui_to_winit_cursor_icon(platform_output.cursor_icon)
             {
                 window.set_cursor_visible(true);
                 window.set_cursor_icon(cursor_icon);
             } else {
                 window.set_cursor_visible(false);
             }
-            self.current_cursor_icon = output.cursor_icon;
+            self.current_cursor_icon = platform_output.cursor_icon;
         }
 
-        (output, clipped_shapes)
+        (platform_output, shapes)
     }
 
-    /// Get [`egui::CtxRef`].
-    pub fn context(&self) -> CtxRef {
+    /// Get [`egui::Context`].
+    pub fn context(&self) -> Context {
         self.context.clone()
     }
 
@@ -841,7 +871,7 @@ impl<A: AllocatorTrait> Integration<A> {
         &mut self,
         command_buffer: vk::CommandBuffer,
         swapchain_image_index: usize,
-        clipped_meshes: Vec<egui::ClippedMesh>,
+        clipped_primitives: Vec<egui::ClippedPrimitive>,
     ) {
         let index = swapchain_image_index;
 
@@ -853,7 +883,7 @@ impl<A: AllocatorTrait> Integration<A> {
         }
 
         // update font texture
-        self.upload_font_texture(command_buffer, &self.context.fonts().texture());
+        self.upload_font_texture(command_buffer);
 
         let mut vertex_buffer_ptr = self.vertex_buffer_allocations[index]
             .mapped_ptr()
@@ -962,7 +992,17 @@ impl<A: AllocatorTrait> Integration<A> {
         // render meshes
         let mut vertex_base = 0;
         let mut index_base = 0;
-        for egui::ClippedMesh(rect, mesh) in clipped_meshes {
+        for egui::ClippedPrimitive {
+            clip_rect,
+            primitive,
+        } in clipped_primitives
+        {
+            let mesh = if let egui::epaint::Primitive::Mesh(mesh) = primitive {
+                mesh
+            } else {
+                panic!("PaintCallback not supported by egui integration!");
+            };
+
             // update texture
             unsafe {
                 if let egui::TextureId::User(id) = mesh.texture_id {
@@ -1024,7 +1064,7 @@ impl<A: AllocatorTrait> Integration<A> {
 
             // record draw commands
             unsafe {
-                let min = rect.min;
+                let min = clip_rect.min;
                 let min = egui::Pos2 {
                     x: min.x * self.scale_factor as f32,
                     y: min.y * self.scale_factor as f32,
@@ -1033,7 +1073,7 @@ impl<A: AllocatorTrait> Integration<A> {
                     x: f32::clamp(min.x, 0.0, self.physical_width as f32),
                     y: f32::clamp(min.y, 0.0, self.physical_height as f32),
                 };
-                let max = rect.max;
+                let max = clip_rect.max;
                 let max = egui::Pos2 {
                     x: max.x * self.scale_factor as f32,
                     y: max.y * self.scale_factor as f32,
@@ -1080,13 +1120,25 @@ impl<A: AllocatorTrait> Integration<A> {
         }
     }
 
-    fn upload_font_texture(&mut self, command_buffer: vk::CommandBuffer, texture: &egui::Texture) {
-        debug_assert_eq!(texture.pixels.len(), texture.width * texture.height);
-
-        // check version
-        if texture.version == self.font_image_version {
+    fn upload_font_texture(&mut self, command_buffer: vk::CommandBuffer) {
+        let image_delta = if !self.textures_delta.is_empty() {
+            // Todo: handle more than just 1 texture
+            assert!(
+                self.textures_delta.set.len() == 1,
+                "currently only supports 1 texture upload"
+            );
+            self.textures_delta.set[0].1.clone()
+        } else {
             return;
-        }
+        };
+
+        let texture = if let egui::epaint::image::ImageData::Font(font_image) = image_delta.image {
+            font_image
+        } else {
+            return;
+        };
+
+        debug_assert_eq!(texture.pixels.len(), texture.width() * texture.height());
 
         unsafe {
             self.device
@@ -1094,7 +1146,7 @@ impl<A: AllocatorTrait> Integration<A> {
                 .expect("Failed to wait device idle");
         }
 
-        let dimensions = (texture.width as u64, texture.height as u64);
+        let dimensions = (texture.width() as u64, texture.height() as u64);
         let data = texture
             .pixels
             .iter()
@@ -1132,7 +1184,7 @@ impl<A: AllocatorTrait> Integration<A> {
                     &vk::BufferCreateInfo::builder()
                         .usage(vk::BufferUsageFlags::TRANSFER_SRC)
                         .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .size(dimensions.0 * dimensions.1 * 4),
+                        .size(dimensions.0 * dimensions.1 * 16),
                     None,
                 )
                 .expect("Failed to create buffer.")
@@ -1164,7 +1216,7 @@ impl<A: AllocatorTrait> Integration<A> {
             self.device
                 .create_image(
                     &vk::ImageCreateInfo::builder()
-                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .format(vk::Format::R32G32B32A32_SFLOAT)
                         .initial_layout(vk::ImageLayout::UNDEFINED)
                         .samples(vk::SampleCountFlags::TYPE_1)
                         .tiling(vk::ImageTiling::OPTIMAL)
@@ -1207,7 +1259,7 @@ impl<A: AllocatorTrait> Integration<A> {
             self.device.create_image_view(
                 &vk::ImageViewCreateInfo::builder()
                     .image(self.font_image)
-                    .format(vk::Format::R8G8B8A8_UNORM)
+                    .format(vk::Format::R32G32B32A32_SFLOAT)
                     .view_type(vk::ImageViewType::TYPE_2D)
                     .subresource_range(
                         vk::ImageSubresourceRange::builder()
@@ -1223,7 +1275,6 @@ impl<A: AllocatorTrait> Integration<A> {
         }
         .expect("Failed to create image view.");
         self.font_image_size = dimensions;
-        self.font_image_version = texture.version;
 
         // update descriptor set
         for &font_descriptor_set in self.font_descriptor_sets.iter() {
@@ -1246,7 +1297,7 @@ impl<A: AllocatorTrait> Integration<A> {
 
         // map memory
         if let Some(allocation) = &self.font_image_staging_buffer_allocation {
-            let ptr = allocation.mapped_ptr().unwrap().as_ptr() as *mut u8;
+            let ptr = allocation.mapped_ptr().unwrap().as_ptr() as *mut f32;
             unsafe {
                 ptr.copy_from_nonoverlapping(data.as_ptr(), data.len());
             }
